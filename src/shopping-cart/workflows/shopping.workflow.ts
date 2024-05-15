@@ -1,12 +1,12 @@
 import { CheckoutResult, Order, ProductItem } from '../types';
 import {
   ActivityFailure,
-  condition,
   defineQuery,
   defineSignal,
   log,
   proxyActivities,
   setHandler,
+  condition,
 } from '@temporalio/workflow';
 import { products } from '../constants';
 import { type IShoppingCart } from '../shopping-cart.service';
@@ -22,14 +22,11 @@ export const getCartContents = defineQuery<Order, []>('getCartContents');
 // Signals
 export const addItemToCart =
   defineSignal<[Pick<ProductItem, 'productId'>]>('addItemToCart');
-
 export const removeItemFromCart =
   defineSignal<[Pick<ProductItem, 'productId'>]>('removeItemFromCart');
-
 export const updateItemQuantityInCart = defineSignal<
   [Pick<ProductItem, 'productId' | 'quantity'>]
 >('updateItemQuantityInCart');
-
 export const checkoutOrder = defineSignal<[]>('checkoutOrder');
 
 export const shoppingWorkflow = async ({ userId }: { userId: string }) => {
@@ -44,21 +41,40 @@ export const shoppingWorkflow = async ({ userId }: { userId: string }) => {
   // queries
   setHandler(getCartContents, () => order);
 
-  // signals
-  setHandler(addItemToCart, ({ productId }) => {
+  // signal handlers
+  setHandler(addItemToCart, createAddItemToCartHandler(order));
+  setHandler(removeItemFromCart, createRemoveItemFromCartHandler(order));
+  setHandler(
+    updateItemQuantityInCart,
+    createUpdateItemQuantityInCartHandler(order),
+  );
+  setHandler(checkoutOrder, createCheckoutOrderHandler(order));
+
+  // order notifications
+  await handleOrderNotifications(userId, order);
+
+  return order;
+};
+
+function createAddItemToCartHandler(order: Order) {
+  return ({ productId }) => {
     const product = products[productId];
     if (product) {
       order.items.push({ ...product, quantity: 1 });
       order.timestamp = new Date();
     }
-  });
+  };
+}
 
-  setHandler(removeItemFromCart, ({ productId }) => {
+function createRemoveItemFromCartHandler(order: Order) {
+  return ({ productId }) => {
     order.items = order.items.filter((item) => item.productId !== productId);
     order.timestamp = new Date();
-  });
+  };
+}
 
-  setHandler(updateItemQuantityInCart, ({ productId, quantity }) => {
+function createUpdateItemQuantityInCartHandler(order: Order) {
+  return ({ productId, quantity }) => {
     const product = products[productId];
     if (!product) {
       return;
@@ -72,9 +88,11 @@ export const shoppingWorkflow = async ({ userId }: { userId: string }) => {
       order.items.push({ ...product, quantity });
     }
     order.timestamp = new Date();
-  });
+  };
+}
 
-  setHandler(checkoutOrder, async () => {
+function createCheckoutOrderHandler(order: Order) {
+  return async () => {
     try {
       order.checkOut = CheckoutResult.Processing;
       order.checkOut = await checkout({ order });
@@ -86,9 +104,15 @@ export const shoppingWorkflow = async ({ userId }: { userId: string }) => {
         throw e;
       }
     }
-  });
+  };
+}
 
-  // notify user when order is not finished at 15 seconds
+async function handleOrderNotifications(userId: string, order: Order) {
+  await handleOpenOrder(userId, order);
+  await handleCloseOrder(userId, order);
+}
+
+async function handleOpenOrder(userId: string, order: Order) {
   await condition(
     () => order.checkOut === CheckoutResult.Processing,
     '15 seconds',
@@ -96,8 +120,9 @@ export const shoppingWorkflow = async ({ userId }: { userId: string }) => {
   if (order.checkOut === CheckoutResult.Open) {
     await notify({ userId, message: 'Please, finish your order' });
   }
+}
 
-  // shopping cart will be closed after 1 min
+async function handleCloseOrder(userId: string, order: Order) {
   await condition(
     () =>
       ![CheckoutResult.Open, CheckoutResult.Processing].includes(
@@ -121,11 +146,7 @@ export const shoppingWorkflow = async ({ userId }: { userId: string }) => {
         message: 'Sorry, we are not able to fulfill your order.',
       });
     } else {
-      await notify({
-        userId,
-        message: 'Thank you for your order.',
-      });
+      await notify({ userId, message: 'Thank you for your order.' });
     }
   }
-  return order;
-};
+}
